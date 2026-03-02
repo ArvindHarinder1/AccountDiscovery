@@ -24,12 +24,21 @@ The guided script walks through the entire process interactively. You need:
 
 ### Run the guided experience
 
-```powershell
-# Basic (Tier 1 + Tier 2 only — no Azure OpenAI needed):
-.\scripts\Start-AccountDiscovery.ps1 -ServicePrincipalId "<your-sp-object-id>"
+No need to clone the repo. Paste this into PowerShell to download and run:
 
-# With AI enhancement (Tier 1 + 2 + 3):
-.\scripts\Start-AccountDiscovery.ps1 -ServicePrincipalId "<your-sp-object-id>" `
+```powershell
+# Download the scripts
+$d = "$env:TEMP\AccountDiscovery"; New-Item $d -ItemType Directory -Force | Out-Null
+$base = "https://raw.githubusercontent.com/ArvindHarinder1/AccountDiscovery/main/scripts"
+'Start-AccountDiscovery','Export-EntraUsers','Export-AppAccounts','Run-AccountDiscovery' | ForEach-Object {
+    Invoke-RestMethod "$base/$_.ps1" -OutFile "$d\$_.ps1"
+}
+
+# Run (basic — Tier 1 + Tier 2 only):
+& "$d\Start-AccountDiscovery.ps1" -ServicePrincipalId "<your-sp-object-id>"
+
+# Or with AI enhancement (Tier 1 + 2 + 3):
+& "$d\Start-AccountDiscovery.ps1" -ServicePrincipalId "<your-sp-object-id>" `
     -AzureOpenAIEndpoint "https://myresource.openai.azure.com/"
 ```
 
