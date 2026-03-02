@@ -1,0 +1,78 @@
+// ============================================================
+// Account Discovery Prototype — Kusto Table Provisioning
+// Run these KQL commands against your Azure Data Explorer database
+// ============================================================
+
+// ── Table: SalesforceAccounts ──
+// Stores imported accounts from Salesforce (extensible to other apps)
+.create table SalesforceAccounts (
+    AccountId: string,
+    Email: string,
+    Username: string,
+    DisplayName: string,
+    FirstName: string,
+    LastName: string,
+    Phone: string,
+    Department: string,
+    Title: string,
+    EmployeeId: string,
+    IsActive: bool,
+    LastLoginDate: datetime,
+    CreatedDate: datetime,
+    SourceApplication: string
+)
+
+// ── Table: EntraUsers ──
+// Stores user records from Microsoft Entra ID
+.create table EntraUsers (
+    ObjectId: string,
+    UserPrincipalName: string,
+    Mail: string,
+    DisplayName: string,
+    GivenName: string,
+    Surname: string,
+    Phone: string,
+    MobilePhone: string,
+    Department: string,
+    JobTitle: string,
+    EmployeeId: string,
+    AccountEnabled: bool,
+    CreatedDateTime: datetime,
+    UserType: string
+)
+
+// ── Table: MatchResults ──
+// Stores the output of the matching engine
+.create table MatchResults (
+    SalesforceAccountId: string,
+    SalesforceDisplayName: string,
+    SalesforceEmail: string,
+    EntraObjectId: string,
+    EntraDisplayName: string,
+    EntraUPN: string,
+    MatchCategory: string,
+    CompositeScore: real,
+    EmailMatchScore: real,
+    NameMatchScore: real,
+    PhoneMatchScore: real,
+    DepartmentMatchScore: real,
+    TitleMatchScore: real,
+    EmployeeIdMatch: bool,
+    AIFlags: string,
+    AIReasoningSummary: string,
+    MatchTimestamp: datetime
+)
+
+// ── Useful Queries ──
+
+// View all high-confidence matches
+// MatchResults | where CompositeScore >= 80 | order by CompositeScore desc
+
+// View unmatched Salesforce accounts
+// MatchResults | where MatchCategory == "None" | project SalesforceAccountId, SalesforceDisplayName, SalesforceEmail, AIFlags
+
+// View AI-flagged accounts (test accounts, service accounts, etc.)
+// MatchResults | where AIFlags != "{}" | project SalesforceDisplayName, SalesforceEmail, AIFlags, AIReasoningSummary
+
+// Summary by match category
+// MatchResults | summarize Count=count() by MatchCategory | order by Count desc
