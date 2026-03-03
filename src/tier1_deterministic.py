@@ -96,6 +96,7 @@ def run_deterministic_matching(
     email_index: dict[str, EntraUser] = {}
     local_part_index: dict[str, EntraUser] = {}
     emp_id_index: dict[str, EntraUser] = {}
+    object_id_index: dict[str, EntraUser] = {}  # For SF EmployeeId → Entra ObjectId matching
 
     for entra in entra_users:
         # Index by full email
@@ -114,6 +115,11 @@ def run_deterministic_matching(
         eid = normalize_employee_id(entra.employee_id)
         if eid:
             emp_id_index[eid] = entra
+
+        # Index by Entra Object ID (handles real-world case where SF
+        # EmployeeId field contains the Entra ObjectId/GUID)
+        if entra.object_id:
+            object_id_index[entra.object_id.strip().lower()] = entra
 
     matched_entra_ids: set[str] = set()  # Prevent duplicate matches
 
@@ -137,6 +143,17 @@ def run_deterministic_matching(
                 if candidate.object_id not in matched_entra_ids:
                     best_match = candidate
                     match_reason = "Employee ID match"
+
+        # Priority 3: SF EmployeeId contains Entra ObjectId (GUID)
+        # Real-world pattern: some apps store the Entra ObjectId as the
+        # employee identifier during provisioning.
+        if not best_match and sf.employee_id:
+            sf_eid_lower = sf.employee_id.strip().lower()
+            if sf_eid_lower in object_id_index:
+                candidate = object_id_index[sf_eid_lower]
+                if candidate.object_id not in matched_entra_ids:
+                    best_match = candidate
+                    match_reason = "SF EmployeeId matches Entra ObjectId"
 
         # Note: Email local-part cross-domain matching is handled in Tier 2
         # as a high-weight fuzzy signal (not deterministic enough for Tier 1)

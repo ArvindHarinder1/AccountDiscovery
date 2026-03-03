@@ -8,15 +8,19 @@ Algorithms used:
 - Token Set Ratio: Good for department/title matching (handles substrings)
 - Phone normalization: Strip formatting, compare digits
 - Levenshtein ratio: Email local-part similarity
+- Nickname resolution: Maps diminutives to canonical names (Bob↔Robert)
+- Unicode normalization: Handles diacritics (José↔Jose, Müller↔Mueller)
 """
 
 import re
+import unicodedata
 from typing import Optional
 
 from rapidfuzz.distance import JaroWinkler
 from thefuzz import fuzz
 
 from src.models import SalesforceAccount, EntraUser, MatchResult
+from src.nicknames import are_nickname_equivalent
 
 
 # ── Attribute weights for composite scoring ──
@@ -46,6 +50,18 @@ def normalize_phone(phone: str) -> str:
     return digits
 
 
+def strip_diacritics(text: str) -> str:
+    """
+    Remove diacritical marks from Unicode text.
+    'José García' → 'Jose Garcia', 'Müller' → 'Muller'
+    """
+    if not text:
+        return text
+    # NFKD decomposition splits base chars from combining marks
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def score_name_similarity(name1: str, name2: str) -> float:
     """
     Score name similarity using Jaro-Winkler distance.
@@ -55,11 +71,17 @@ def score_name_similarity(name1: str, name2: str) -> float:
     - It gives a bonus for matching prefixes (common in names)
     - It handles transpositions well
     - It's less sensitive to string length differences
+
+    Also normalizes diacritics before comparison so that
+    José↔Jose, Müller↔Mueller score as identical.
     """
     if not name1 or not name2:
         return 0.0
-    n1 = name1.strip().lower()
-    n2 = name2.strip().lower()
+    n1 = strip_diacritics(name1.strip().lower())
+    n2 = strip_diacritics(name2.strip().lower())
+    # Normalize hyphens/spaces for compound names
+    n1 = n1.replace("-", " ")
+    n2 = n2.replace("-", " ")
     if n1 == n2:
         return 1.0
     return JaroWinkler.similarity(n1, n2)
@@ -68,10 +90,16 @@ def score_name_similarity(name1: str, name2: str) -> float:
 def score_name_parts(sf_first: str, sf_last: str, entra_given: str, entra_surname: str) -> float:
     """
     Score first+last name similarity with tokenization.
-    Handles name-order variations and initials.
+    Handles name-order variations, initials, and nicknames.
     """
     if not (sf_first or sf_last) or not (entra_given or entra_surname):
         return 0.0
+
+    # Normalize diacritics for all components
+    sf_f_clean = strip_diacritics(sf_first.strip().lower()) if sf_first else ""
+    sf_l_clean = strip_diacritics(sf_last.strip().lower()).replace("-", " ") if sf_last else ""
+    en_g_clean = strip_diacritics(entra_given.strip().lower()) if entra_given else ""
+    en_s_clean = strip_diacritics(entra_surname.strip().lower()).replace("-", " ") if entra_surname else ""
 
     # Try direct first↔first, last↔last
     first_score = score_name_similarity(sf_first, entra_given)
@@ -90,7 +118,21 @@ def score_name_parts(sf_first: str, sf_last: str, entra_given: str, entra_surnam
     if len(sf_f) == 1 and entra_g and sf_f.lower() == entra_g[0].lower():
         initial_bonus = 0.3  # Partial credit for initial match
 
-    return max(direct, swapped, initial_bonus + last_score * 0.7)
+    # Nickname bonus: "Bob" ↔ "Robert" gets 0.85 credit
+    nickname_bonus = 0.0
+    if are_nickname_equivalent(sf_f_clean, en_g_clean):
+        # Nickname match on first name — strong signal when last name also matches
+        nickname_bonus = 0.85 * 0.5 + last_score * 0.5
+
+    # Compound last name handling: "Johnson-Smith" should match "Smith" partially
+    compound_bonus = 0.0
+    for sf_part in sf_l_clean.split():
+        for en_part in en_s_clean.split():
+            if sf_part == en_part and len(sf_part) > 2:
+                part_sim = score_name_similarity(sf_first, entra_given)
+                compound_bonus = max(compound_bonus, (1.0 + part_sim) / 2 * 0.8)
+
+    return max(direct, swapped, initial_bonus + last_score * 0.7, nickname_bonus, compound_bonus)
 
 
 def score_phone_match(phone1: str, phone2: str, phone3: str = "") -> float:
@@ -183,20 +225,56 @@ def compute_composite_score(
     dept_score: float,
     title_score: float,
     username_local_score: float = 0.0,
+    adaptive: bool = True,
 ) -> float:
     """
     Compute weighted composite score from individual attribute scores.
     All inputs are 0.0-1.0, output is 0-100.
+
+    When adaptive=True (default), redistributes weight from empty/zero-score
+    signals to populated signals. This prevents sparse data (common in real
+    customer environments where phone/dept/title are often blank) from
+    artificially suppressing scores for obvious matches.
     """
-    composite = (
-        name_score * WEIGHTS["name"]
-        + name_parts_score * WEIGHTS["name_parts"]
-        + phone_score * WEIGHTS["phone"]
-        + email_local_score * WEIGHTS["email_local"]
-        + dept_score * WEIGHTS["department"]
-        + title_score * WEIGHTS["title"]
-        + username_local_score * WEIGHTS["username_local"]
+    signal_weights = {
+        "name": (name_score, WEIGHTS["name"]),
+        "name_parts": (name_parts_score, WEIGHTS["name_parts"]),
+        "phone": (phone_score, WEIGHTS["phone"]),
+        "email_local": (email_local_score, WEIGHTS["email_local"]),
+        "department": (dept_score, WEIGHTS["department"]),
+        "title": (title_score, WEIGHTS["title"]),
+        "username_local": (username_local_score, WEIGHTS["username_local"]),
+    }
+
+    if not adaptive:
+        composite = sum(score * weight for score, weight in signal_weights.values())
+        return round(composite * 100, 2)
+
+    # Adaptive redistribution: identify which signals have data
+    # A signal "has data" if it contributes a score > 0. Signals that are
+    # 0 because the fields were empty get their weight redistributed.
+    populated = {k: (s, w) for k, (s, w) in signal_weights.items() if s > 0}
+    unpopulated = {k: (s, w) for k, (s, w) in signal_weights.items() if s == 0}
+
+    if not populated:
+        return 0.0
+
+    # Redistribute unpopulated weight proportionally to populated signals
+    total_populated_weight = sum(w for _, w in populated.values())
+    total_unpopulated_weight = sum(w for _, w in unpopulated.values())
+
+    if total_populated_weight == 0:
+        return 0.0
+
+    # Cap redistribution at 50% boost to prevent name-only matches from
+    # inflating to 100. E.g., if only name signals are available (0.45 weight),
+    # they can grow to at most 0.45 * 1.5 = 0.675 effective weight.
+    boost_factor = min(
+        1.0 + total_unpopulated_weight / total_populated_weight,
+        1.5,
     )
+
+    composite = sum(score * weight * boost_factor for score, weight in populated.values())
     return round(composite * 100, 2)
 
 
