@@ -257,7 +257,7 @@ and a candidate match from Microsoft Entra ID, along with their fuzzy match scor
 
 Your job is to:
 1. Evaluate whether this is likely the same person
-2. Provide a confidence adjustment (-15 to +15 points) to the fuzzy score
+2. Provide a confidence adjustment (-30 to +30 points) to the fuzzy score
 3. Explain your reasoning in 1-2 sentences for the admin
 
 Consider:
@@ -267,7 +267,7 @@ Consider:
 
 Respond ONLY with a JSON object:
 {
-  "adjustment": <integer -15 to +15>,
+  "adjustment": <integer -30 to +30>,
   "reasoning": "<1-2 sentence explanation>",
   "is_likely_match": <true/false>
 }
@@ -315,7 +315,7 @@ Score Breakdown: {json.dumps(score_details)}"""
     if response:
         try:
             result = json.loads(response)
-            adjustment = max(-15, min(15, int(result.get("adjustment", 0))))
+            adjustment = max(-30, min(30, int(result.get("adjustment", 0))))
             reasoning = result.get("reasoning", "")
             adjusted = max(0, min(99, fuzzy_score + adjustment))
             return adjusted, reasoning

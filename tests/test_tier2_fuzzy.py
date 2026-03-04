@@ -213,9 +213,10 @@ class TestCompositeScore:
         assert score == 0.0
 
     def test_name_only_perfect(self):
-        """With adaptive weighting, name-only signals get boosted (capped at 1.5x)."""
+        """With adaptive weighting, name-only signals get boosted (capped at 1.3x).
+        But corroboration requirement caps name-only matches at 49."""
         score = compute_composite_score(1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        assert 60 < score < 70  # 45 base * 1.5 cap = 67.5
+        assert score <= 49, f"Name-only should be capped at 49 by corroboration requirement, got {score}"
 
     def test_name_only_non_adaptive(self):
         """Without adaptive weighting, name-only maxes at ~45."""
@@ -264,6 +265,97 @@ class TestSparseDataScoring:
             # With adaptive weighting the score is slightly higher, but still
             # well below the Medium threshold (50)
             assert score < 50, f"Wrong person score {score} crossed Medium threshold"
+
+
+# ── False positive prevention ──
+
+class TestFalsePositivePrevention:
+    """Regression tests for known false positive pairs that should NOT match as Medium."""
+
+    def test_alex_wilber_vs_alex_wilson(self):
+        """Alex Wilber and Alex Wilson are different people.
+        Similar first names and 'wil' prefix on last name should not fool the matcher."""
+        sf = make_sf(
+            account_id="569221c5", display_name="Alex Wilber",
+            first_name="Alex", last_name="Wilber",
+            email="alexw@m365x42521811.onmicrosoft.com",
+            username="alexw@M365x42521811.OnMicrosoft.com",
+        )
+        entra = make_entra(
+            object_id="0090658f", display_name="Alex Wilson 66824",
+            given_name="Alex", surname="Wilson 66824",
+            user_principal_name="alex.wilson66824@M365x30505150.OnMicrosoft.com",
+            mail="alex.wilson66824@M365x30505150.OnMicrosoft.com",
+        )
+        matches = find_fuzzy_matches(sf, [entra], set(), top_n=1)
+        assert len(matches) == 1
+        _, score, details = matches[0]
+        assert score < 50, (
+            f"Alex Wilber vs Alex Wilson scored {score} (>= Medium). "
+            f"Details: {details}. These are clearly different people."
+        )
+
+    def test_johanna_lorenz_vs_jordan_lopez(self):
+        """Johanna Lorenz and Jordan Lopez are different people.
+        The 'Jo' prefix and 'Lo' last-name prefix should not create a Medium match."""
+        sf = make_sf(
+            account_id="74b00298", display_name="Johanna Lorenz",
+            first_name="Johanna", last_name="Lorenz",
+            email="johannal@m365x42521811.onmicrosoft.com",
+            username="johannal@M365x42521811.OnMicrosoft.com",
+        )
+        entra = make_entra(
+            object_id="006b6d42", display_name="Jordan Lopez 7098",
+            given_name="Jordan", surname="Lopez 7098",
+            user_principal_name="jordan.lopez7098@M365x30505150.OnMicrosoft.com",
+            mail="jordan.lopez7098@M365x30505150.OnMicrosoft.com",
+        )
+        matches = find_fuzzy_matches(sf, [entra], set(), top_n=1)
+        assert len(matches) == 1
+        _, score, details = matches[0]
+        assert score < 50, (
+            f"Johanna Lorenz vs Jordan Lopez scored {score} (>= Medium). "
+            f"Details: {details}. These are clearly different people."
+        )
+
+    def test_true_match_still_works(self):
+        """A real match with name + email should still score Medium or above."""
+        sf = make_sf(
+            account_id="SF-REAL", display_name="Christie Cline",
+            first_name="Christie", last_name="Cline",
+            email="christiec@m365x42521811.onmicrosoft.com",
+            username="ChristieC@M365x42521811.OnMicrosoft.com",
+        )
+        entra = make_entra(
+            object_id="004d5d50", display_name="Charlie Martinez 74782",
+            given_name="Charlie", surname="Martinez 74782",
+            user_principal_name="charlie.martinez74782@M365x30505150.OnMicrosoft.com",
+            mail="charlie.martinez74782@M365x30505150.OnMicrosoft.com",
+        )
+        # This is NOT a real match — just verifying different people stay low
+        matches = find_fuzzy_matches(sf, [entra], set(), top_n=1)
+        if matches:
+            _, score, _ = matches[0]
+            assert score < 50, f"Christie Cline vs Charlie Martinez should be < 50, got {score}"
+
+    def test_same_person_name_email_match(self):
+        """Same person with matching name and email should still score well."""
+        sf = make_sf(
+            account_id="SF-SAME", display_name="Isaiah Langer",
+            first_name="Isaiah", last_name="Langer",
+            email="isaiahl@m365x42521811.onmicrosoft.com",
+            username="IsaiahL@M365x42521811.OnMicrosoft.com",
+        )
+        entra = make_entra(
+            object_id="ENTRA-SAME", display_name="Isaiah Langer",
+            given_name="Isaiah", surname="Langer",
+            user_principal_name="isaiahl@m365x42521811.onmicrosoft.com",
+            mail="isaiahl@m365x42521811.onmicrosoft.com",
+        )
+        matches = find_fuzzy_matches(sf, [entra], set(), top_n=1)
+        assert len(matches) == 1
+        _, score, _ = matches[0]
+        assert score >= 80, f"Same person (Isaiah Langer) should score >= 80, got {score}"
 
 
 # ── Disambiguation ──

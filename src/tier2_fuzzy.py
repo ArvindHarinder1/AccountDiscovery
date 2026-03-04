@@ -119,8 +119,9 @@ def score_name_parts(sf_first: str, sf_last: str, entra_given: str, entra_surnam
         initial_bonus = 0.3  # Partial credit for initial match
 
     # Nickname bonus: "Bob" ↔ "Robert" gets 0.85 credit
+    # Only applies when names are actually different (not identical first names)
     nickname_bonus = 0.0
-    if are_nickname_equivalent(sf_f_clean, en_g_clean):
+    if are_nickname_equivalent(sf_f_clean, en_g_clean) and sf_f_clean != en_g_clean:
         # Nickname match on first name — strong signal when last name also matches
         nickname_bonus = 0.85 * 0.5 + last_score * 0.5
 
@@ -132,7 +133,15 @@ def score_name_parts(sf_first: str, sf_last: str, entra_given: str, entra_surnam
                 part_sim = score_name_similarity(sf_first, entra_given)
                 compound_bonus = max(compound_bonus, (1.0 + part_sim) / 2 * 0.8)
 
-    return max(direct, swapped, initial_bonus + last_score * 0.7, nickname_bonus, compound_bonus)
+    # Last-name dissimilarity gate: if last names are clearly different
+    # (JW < 0.80 and not nickname-equivalent), cap name_parts to prevent
+    # prefix-similar but different last names (Wilber/Wilson, Lorenz/Lopez)
+    # from inflating scores.
+    best = max(direct, swapped, initial_bonus + last_score * 0.7, nickname_bonus, compound_bonus)
+    if last_score < 0.80 and swap_last < 0.80:
+        # Neither direct nor swapped last-name pairing is strong
+        best = min(best, 0.50)
+    return best
 
 
 def score_phone_match(phone1: str, phone2: str, phone3: str = "") -> float:
@@ -266,16 +275,41 @@ def compute_composite_score(
     if total_populated_weight == 0:
         return 0.0
 
-    # Cap redistribution at 50% boost to prevent name-only matches from
-    # inflating to 100. E.g., if only name signals are available (0.45 weight),
-    # they can grow to at most 0.45 * 1.5 = 0.675 effective weight.
+    # Cap redistribution at 30% boost to prevent name-only matches from
+    # inflating into the Medium range. E.g., if only name signals are available
+    # (0.45 weight), they can grow to at most 0.45 * 1.3 = 0.585 effective weight.
     boost_factor = min(
         1.0 + total_unpopulated_weight / total_populated_weight,
-        1.5,
+        1.3,
     )
 
     composite = sum(score * weight * boost_factor for score, weight in populated.values())
-    return round(composite * 100, 2)
+    raw = round(composite * 100, 2)
+
+    # ── Contradicting-evidence penalty ──
+    # If name signals are strong (>0.6) but the best email/username signal is
+    # weak (<0.3) AND email data actually exists, the mismatch is a red flag.
+    # Apply a 0.7x penalty to the composite.
+    if email_local_score > 0 and email_local_score < 0.3:
+        # Email exists but doesn't match well
+        if name_score > 0.6 or name_parts_score > 0.6:
+            raw = round(raw * 0.7, 2)
+
+    # ── Corroboration requirement ──
+    # If the ONLY populated signals are name-related (name + name_parts) and no
+    # corroborating evidence exists (email, phone, dept, title all ≤ 0.5), cap
+    # the score just below the Medium threshold. Name-only matches are not
+    # sufficient for Medium confidence. The 0.5 threshold ensures that weak/
+    # ambiguous email similarities (e.g., "alexw" vs "alex.wilson66824" = 0.48)
+    # don't count as real corroboration.
+    corroborating = any(
+        s > 0.5 for k, (s, _) in signal_weights.items()
+        if k not in ("name", "name_parts")
+    )
+    if not corroborating and raw >= 50:
+        raw = 49.0
+
+    return raw
 
 
 def _score_pair(
@@ -296,14 +330,16 @@ def _score_pair(
     email_local_score = score_email_local_part(sf_account.email, entra.mail)
     # Also compare SF username local-part against Entra UPN local-part
     username_local_score = score_email_local_part(sf_account.username, entra.user_principal_name)
-    # Take the best of email-vs-mail and username-vs-UPN for the email signal
+    # Take the best of email-vs-mail and username-vs-UPN for the email signal.
+    # Pass 0.0 for username_local to avoid double-counting (the best is already
+    # captured in best_email_score).
     best_email_score = max(email_local_score, username_local_score)
     dept_score = score_department(sf_account.department, entra.department)
     title_score = score_title(sf_account.title, entra.job_title)
 
     composite = compute_composite_score(
         name_score, name_parts_score, phone_score,
-        best_email_score, dept_score, title_score, username_local_score
+        best_email_score, dept_score, title_score, 0.0
     )
 
     score_details = {
